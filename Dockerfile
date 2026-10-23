@@ -19,7 +19,7 @@ COPY . .
 
 # Build the Go binary with CGO enabled (required for bimg/libvips)
 # -ldflags="-s -w" strips debug info for smaller binary
-RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o image-loader ./cmd
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o imgproxy ./cmd
 
 # ---------------------------
 # 2. Runtime Stage
@@ -37,10 +37,10 @@ RUN useradd -u 1001 -m appuser
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /app/image-loader .
+COPY --from=builder /app/imgproxy .
 
 # Set ownership to non-root user
-RUN chown appuser:appuser /app/image-loader
+RUN chown appuser:appuser /app/imgproxy
 
 USER appuser
 
@@ -48,4 +48,4 @@ USER appuser
 EXPOSE 8080
 
 # Run the app
-CMD ["./image-loader"]
+CMD ["./imgproxy"]

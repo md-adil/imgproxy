@@ -7,14 +7,13 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/h2non/bimg"
 
-	"image-loader/internal/config"
-	"image-loader/internal/image/etag"
+	"imgproxy/internal/config"
+	"imgproxy/internal/image/etag"
 )
 
 var (
@@ -70,8 +69,19 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imagePath := strings.TrimPrefix(r.URL.Path, "/x/")
-	srcURL := fmt.Sprintf("https://%s/%s", srcDomain, imagePath)
+	// Source scheme: http by default, ssl=true switches to https
+	scheme := "http"
+	switch query.Get("ssl") {
+	case "", "false":
+	case "true":
+		scheme = "https"
+	default:
+		http.Error(w, "Invalid ssl", http.StatusBadRequest)
+		return
+	}
+
+	// Route prefix is stripped by the mux (see IMAGE_PATH_PREFIX)
+	srcURL := fmt.Sprintf("%s://%s/%s", scheme, srcDomain, r.URL.Path)
 
 	log.Println("Processing Image:", srcURL)
 
@@ -177,7 +187,7 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 
 func Handler() func(w http.ResponseWriter, r *http.Request) {
 	bimg.VipsCacheSetMax(100)
-	bimg.VipsCacheSetMaxMem(config.EnvInt("VIPS_CACHE_MAX_MEM_MB", 512)) // MB
+	bimg.VipsCacheSetMaxMem(config.Int("VIPS_CACHE_MAX_MEM_MB", 512)) // MB
 	PrintSupportedFormats()
 	WarmLibVips()
 	return handleImage

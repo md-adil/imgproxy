@@ -10,31 +10,33 @@ import (
 	"syscall"
 	"time"
 
-	"image-loader/internal/config"
-	"image-loader/internal/domain"
-	"image-loader/internal/image"
-	"image-loader/internal/middleware"
+	"imgproxy/internal/config"
+	"imgproxy/internal/domain"
+	"imgproxy/internal/image"
+	"imgproxy/internal/middleware"
 )
 
 func getMaxWorker() int {
 	defaultMax := max(runtime.NumCPU(), 1)
-	return config.EnvInt("MAX_WORKERS", defaultMax)
+	return config.Int("MAX_WORKERS", defaultMax)
 }
 
 func main() {
 	// Allow GOMAXPROCS override
-	if n := config.EnvInt("GOMAXPROCS", 0); n > 0 {
+	if n := config.Int("GOMAXPROCS", 0); n > 0 {
 		runtime.GOMAXPROCS(n)
 	}
 
 	maxWorkers := getMaxWorker()
 
-	maxReq := config.EnvInt("MAX_HTTP_CONNS", max(4, maxWorkers*2))
+	maxReq := config.Int("MAX_HTTP_CONNS", max(4, maxWorkers*2))
 
 	mux := http.NewServeMux()
 	handler := middleware.LimitMiddleware(mux, maxReq, 25*time.Second, "/health-z")
 	wl := domain.CreateWhitelist()
-	mux.Handle("/x/", wl.Guard(http.HandlerFunc(image.Handler())))
+	// Used as-is, e.g. "/x" serves images under /x/; empty serves from root
+	prefix := config.String("IMAGE_PATH_PREFIX", "") + "/"
+	mux.Handle(prefix, http.StripPrefix(prefix, wl.Guard(http.HandlerFunc(image.Handler()))))
 	mux.HandleFunc("/health-z", healthCheck)
 
 	srv := &http.Server{
@@ -60,8 +62,8 @@ func main() {
 		close(idleConnsClosed)
 	}()
 
-	log.Printf("Server starting on %s (MAX_WORKERS=%d, VIPS_CONCURRENCY=%s)\n",
-		srv.Addr, maxWorkers, os.Getenv("VIPS_CONCURRENCY"))
+	log.Printf("Server starting on %s (PREFIX=%s, MAX_WORKERS=%d, VIPS_CONCURRENCY=%s)\n",
+		srv.Addr, prefix, maxWorkers, os.Getenv("VIPS_CONCURRENCY"))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("ListenAndServe(): %v", err)
 	}

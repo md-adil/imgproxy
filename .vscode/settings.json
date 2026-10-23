@@ -1,3 +1,6 @@
 {
-  "cSpell.words": ["bimg"]
+  "cSpell.words": ["bimg", "imgproxy"],
+  "[go]": {
+    "editor.tabSize": 2
+  }
 }

@@ -3,8 +3,8 @@ package domain
 import (
 	"log"
 	"net/http"
-	"os"
-	"strings"
+
+	"imgproxy/internal/config"
 )
 
 // Whitelist holds the set of allowed domains loaded from the environment.
@@ -16,16 +16,13 @@ type Whitelist struct {
 // If the env var is empty, all domains are allowed.
 func CreateWhitelist() *Whitelist {
 	wl := &Whitelist{allowed: make(map[string]bool)}
-	domains := os.Getenv("WHITELISTED_DOMAINS")
-	if domains == "" {
+	domains := config.Strings("WHITELISTED_DOMAINS")
+	if len(domains) == 0 {
 		log.Println("WHITELISTED_DOMAINS not set — all domains are allowed")
 		return wl
 	}
-	for domain := range strings.SplitSeq(domains, ",") {
-		trimmed := strings.TrimSpace(domain)
-		if trimmed != "" {
-			wl.allowed[trimmed] = true
-		}
+	for _, domain := range domains {
+		wl.allowed[domain] = true
 	}
 	log.Printf("Whitelisted domains: %v", wl.allowed)
 	return wl

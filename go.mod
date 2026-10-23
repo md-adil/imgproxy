@@ -1,4 +1,4 @@
-module image-loader
+module imgproxy
 
 go 1.24.6
 

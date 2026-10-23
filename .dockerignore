@@ -17,3 +17,8 @@ docker-compose*.yaml
 # IDE
 .vscode/
 .idea/
+.editorconfig
+
+# Docker
+Dockerfile
+.dockerignore

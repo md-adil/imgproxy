@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"imgproxy/internal/cache"
 	"imgproxy/internal/config"
 	"imgproxy/internal/domain"
 	"imgproxy/internal/image"
@@ -36,7 +37,12 @@ func main() {
 	wl := domain.CreateWhitelist()
 	// Used as-is, e.g. "/x" serves images under /x/; empty serves from root
 	prefix := config.String("IMAGE_PATH_PREFIX", "") + "/"
-	mux.Handle(prefix, http.StripPrefix(prefix, wl.Guard(http.HandlerFunc(image.Handler()))))
+	// Disk cache is enabled only when CACHE_DIR is set, e.g. "file:///app/cached"
+	store, err := cache.New(config.String("CACHE_DIR", ""))
+	if err != nil {
+		log.Fatalf("CACHE_DIR: %v", err)
+	}
+	mux.Handle(prefix, http.StripPrefix(prefix, wl.Guard(http.HandlerFunc(image.Handler(store)))))
 	mux.HandleFunc("/health-z", healthCheck)
 
 	srv := &http.Server{
@@ -62,8 +68,8 @@ func main() {
 		close(idleConnsClosed)
 	}()
 
-	log.Printf("Server starting on %s (PREFIX=%s, MAX_WORKERS=%d, VIPS_CONCURRENCY=%s)\n",
-		srv.Addr, prefix, maxWorkers, os.Getenv("VIPS_CONCURRENCY"))
+	log.Printf("Server starting on %s (PREFIX=%s, CACHE_DIR=%q, MAX_WORKERS=%d, VIPS_CONCURRENCY=%s)\n",
+		srv.Addr, prefix, store.Dir(), maxWorkers, os.Getenv("VIPS_CONCURRENCY"))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("ListenAndServe(): %v", err)
 	}

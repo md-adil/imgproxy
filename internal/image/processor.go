@@ -12,6 +12,7 @@ import (
 
 	"github.com/h2non/bimg"
 
+	"imgproxy/internal/cache"
 	"imgproxy/internal/config"
 	"imgproxy/internal/image/etag"
 )
@@ -45,7 +46,28 @@ func safeProcessImage(origImg []byte, opts bimg.Options) (newImg []byte, err err
 	return
 }
 
-func handleImage(w http.ResponseWriter, r *http.Request) {
+func writeImage(w http.ResponseWriter, img []byte, mediaType bimg.ImageType, tag string) {
+	mimeType := fmt.Sprintf("image/%s", bimg.ImageTypeName(mediaType))
+	header := w.Header()
+	header.Set("Content-Type", mimeType)
+
+	header.Set("Cache-Control", "public, max-age=2592000")
+
+	if tag != "" {
+		header.Set("ETag", tag)
+	}
+
+	header.Set("Vary", "Accept")
+
+	header.Set("X-Content-Type-Options", "nosniff")
+
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(img); err != nil {
+		log.Printf("write error: %v\n", err)
+	}
+}
+
+func handleImage(store *cache.Store, w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	srcDomain := query.Get("d")
 
@@ -82,6 +104,43 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 
 	// Route prefix is stripped by the mux (see IMAGE_PATH_PREFIX)
 	srcURL := fmt.Sprintf("%s://%s/%s", scheme, srcDomain, r.URL.Path)
+
+	mediaType := GetMediaType(r.Header.Get("Accept"))
+
+	options := bimg.Options{
+		Force:         false,
+		Enlarge:       false,
+		Compression:   1,
+		StripMetadata: true,
+		Type:          mediaType,
+	}
+
+	if quality > 0 {
+		options.Quality = quality
+	}
+
+	if width > 0 {
+		options.Width = width
+	}
+
+	if height > 0 {
+		options.Height = height
+	}
+
+	// Cache key depends only on source URL and options, so hits skip fetching the source.
+	// With caching enabled it also serves as the ETag, keeping hits and misses consistent.
+	var cacheKey string
+	if store != nil {
+		cacheKey = etag.Generate(nil, srcURL, options)
+		if etag.Matched(r, cacheKey) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		if img, ok := store.Get(cacheKey); ok {
+			writeImage(w, img, mediaType, cacheKey)
+			return
+		}
+	}
 
 	log.Println("Processing Image:", srcURL)
 
@@ -126,30 +185,12 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mediaType := GetMediaType(r.Header.Get("Accept"))
-
-	options := bimg.Options{
-		Force:         false,
-		Enlarge:       false,
-		Compression:   1,
-		StripMetadata: true,
-		Type:          mediaType,
-	}
-
-	if quality > 0 {
-		options.Quality = quality
-	}
-
-	if width > 0 {
-		options.Width = width
-	}
-
-	if height > 0 {
-		options.Height = height
-	}
 	origImg := buf.Bytes()
 
-	tag := etag.Generate(origImg, srcURL, options)
+	tag := cacheKey
+	if tag == "" {
+		tag = etag.Generate(origImg, srcURL, options)
+	}
 	if etag.Matched(r, tag) {
 		w.WriteHeader(http.StatusNotModified)
 		log.Println("Skipping already matched with ETag")
@@ -164,31 +205,21 @@ func handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mimeType := fmt.Sprintf("image/%s", bimg.ImageTypeName(mediaType))
-	log.Println("Sending Type", mimeType)
-	header := w.Header()
-	header.Set("Content-Type", mimeType)
-
-	header.Set("Cache-Control", "public, max-age=2592000")
-
-	if tag != "" {
-		header.Set("ETag", tag)
+	if cacheKey != "" {
+		store.Put(cacheKey, newImg)
 	}
 
-	header.Set("Vary", "Accept")
-
-	header.Set("X-Content-Type-Options", "nosniff")
-
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(newImg); err != nil {
-		log.Printf("write error: %v\n", err)
-	}
+	log.Println("Sending Type", bimg.ImageTypeName(mediaType))
+	writeImage(w, newImg, mediaType, tag)
 }
 
-func Handler() func(w http.ResponseWriter, r *http.Request) {
+// Handler returns the image handler. A nil store disables disk caching.
+func Handler(store *cache.Store) func(w http.ResponseWriter, r *http.Request) {
 	bimg.VipsCacheSetMax(100)
 	bimg.VipsCacheSetMaxMem(config.Int("VIPS_CACHE_MAX_MEM_MB", 512)) // MB
 	PrintSupportedFormats()
 	WarmLibVips()
-	return handleImage
+	return func(w http.ResponseWriter, r *http.Request) {
+		handleImage(store, w, r)
+	}
 }

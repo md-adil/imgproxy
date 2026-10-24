@@ -2,20 +2,23 @@ package cache
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 )
 
-// Store keeps processed images on disk, keyed by a hex hash.
-// A nil *Store is valid and caches nothing.
+const DefaultValidity = 24 * time.Hour
+
 type Store struct {
-	dir string
+	dir      string
+	validity time.Duration
 }
 
-// New parses a cache URL such as "file:///app/cached".
-// An empty URL disables caching and returns a nil Store.
 func New(rawURL string) (*Store, error) {
 	if rawURL == "" {
 		return nil, nil
@@ -24,16 +27,35 @@ func New(rawURL string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if u.Scheme != "file" || u.Path == "" {
-		return nil, fmt.Errorf("unsupported cache URL %q: use file:///path", rawURL)
+	dir := u.Path
+	switch {
+	case u.Opaque != "":
+		dir = u.Opaque
+	case u.Host != "" && u.Host != "localhost":
+		dir = u.Host + u.Path
 	}
-	if err := os.MkdirAll(u.Path, 0o755); err != nil {
+	if u.Scheme != "file" || dir == "" {
+		return nil, fmt.Errorf("unsupported cache URL %q: use file:///abs/path or file://./rel/path", rawURL)
+	}
+	if dir, err = filepath.Abs(dir); err != nil {
 		return nil, err
 	}
-	return &Store{dir: u.Path}, nil
+	validity := DefaultValidity
+	if v := u.Query().Get("validity"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil || secs <= 0 {
+			return nil, fmt.Errorf("invalid cache validity %q: use a positive number of seconds", v)
+		}
+		validity = time.Duration(secs) * time.Second
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	s := &Store{dir: dir, validity: validity}
+	go s.cleanup()
+	return s, nil
 }
 
-// Dir returns the cache directory, or "" when caching is disabled.
 func (s *Store) Dir() string {
 	if s == nil {
 		return ""
@@ -41,29 +63,53 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
-// path shards files by the first two key characters to keep directories small.
+func (s *Store) Validity() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.validity
+}
+
 func (s *Store) path(key string) string {
 	return filepath.Join(s.dir, key[:2], key)
 }
 
-// Get returns the cached data for key, if present.
+func (s *Store) expired(info fs.FileInfo) bool {
+	return time.Since(info.ModTime()) > s.validity
+}
+
 func (s *Store) Get(key string) ([]byte, bool) {
-	if s == nil {
+	if s == nil || len(key) < 2 {
 		return nil, false
 	}
-	data, err := os.ReadFile(s.path(key))
+	p := s.path(key)
+	f, err := os.Open(p)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("cache read error: %v", err)
 		}
 		return nil, false
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		log.Printf("cache read error: %v", err)
+		return nil, false
+	}
+	if s.expired(info) {
+		os.Remove(p)
+		return nil, false
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		log.Printf("cache read error: %v", err)
+		return nil, false
+	}
 	return data, true
 }
 
-// Put stores data under key, writing to a temp file first so readers never see partial files.
 func (s *Store) Put(key string, data []byte) {
-	if s == nil {
+	if s == nil || len(key) < 2 {
 		return
 	}
 	dst := s.path(key)
@@ -86,5 +132,31 @@ func (s *Store) Put(key string, data []byte) {
 	if err != nil {
 		os.Remove(tmp.Name())
 		log.Printf("cache write error: %v", err)
+	}
+}
+
+func (s *Store) cleanup() {
+	interval := min(max(s.validity/2, time.Minute), time.Hour)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.walk()
+	}
+}
+
+func (s *Store) walk() {
+	removed := 0
+	filepath.WalkDir(s.dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err == nil && s.expired(info) && os.Remove(p) == nil {
+			removed++
+		}
+		return nil
+	})
+	if removed > 0 {
+		log.Printf("cache cleanup: removed %d expired files", removed)
 	}
 }

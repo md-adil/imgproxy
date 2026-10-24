@@ -16,7 +16,7 @@ func CreateWhitelist() *Whitelist {
 	wl := &Whitelist{domains: make(map[string]string)}
 	entries := config.Strings("DOMAINS")
 	if len(entries) == 0 {
-		log.Println("DOMAINS not set — all domains are allowed")
+		log.Println("No whitelisted domains found in environment variable 'DOMAINS'")
 		return wl
 	}
 	for _, entry := range entries {

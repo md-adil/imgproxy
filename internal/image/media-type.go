@@ -3,17 +3,16 @@ package image
 import (
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/h2non/bimg"
 )
 
-// acceptItem holds a parsed Accept header media type with its q-value.
 type acceptItem struct {
 	mimeType string
 	q        float64
 }
 
-// parseAccept parses the Accept header and returns items sorted by q-value descending.
 func parseAccept(accept string) []acceptItem {
 	parts := strings.Split(accept, ",")
 	items := make([]acceptItem, 0, len(parts))
@@ -35,7 +34,6 @@ func parseAccept(accept string) []acceptItem {
 		}
 		items = append(items, acceptItem{mimeType: mime, q: q})
 	}
-	// Stable sort by q descending (insertion sort — small N)
 	for i := 1; i < len(items); i++ {
 		for j := i; j > 0 && items[j].q > items[j-1].q; j-- {
 			items[j], items[j-1] = items[j-1], items[j]
@@ -44,15 +42,30 @@ func parseAccept(accept string) []acceptItem {
 	return items
 }
 
-// GetMediaType returns the best supported image type based on the Accept header.
-// AVIF is preferred over WebP when both are accepted with equal or higher q-value.
+var savable = sync.OnceValue(func() map[bimg.ImageType]bool {
+	m := make(map[bimg.ImageType]bool)
+	for _, t := range []bimg.ImageType{bimg.AVIF, bimg.WEBP} {
+		m[t] = bimg.IsImageTypeSupportedByVips(t).Save
+	}
+	return m
+})
+
 func GetMediaType(accept string) bimg.ImageType {
 	for _, item := range parseAccept(accept) {
+		if item.q <= 0 {
+			continue
+		}
+		var t bimg.ImageType
 		switch item.mimeType {
 		case "image/avif":
-			return bimg.AVIF
+			t = bimg.AVIF
 		case "image/webp":
-			return bimg.WEBP
+			t = bimg.WEBP
+		default:
+			continue
+		}
+		if savable()[t] {
+			return t
 		}
 	}
 	return bimg.JPEG

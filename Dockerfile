@@ -45,7 +45,7 @@ WORKDIR /app
 # Copy binary from builder (owned by root so the app cannot modify it)
 COPY --from=builder /app/imgproxy .
 
-# Disk cache location, used only when CACHE_DIR=file:///app/cached is set
+# Disk cache location, used only when CACHE_URL=file:///app/cached?validity=86400 is set
 RUN mkdir -p /app/cached && chown imgproxy:imgproxy /app/cached
 VOLUME /app/cached
 

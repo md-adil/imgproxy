@@ -13,14 +13,19 @@ func String(name string, fallback string) string {
 	return fallback
 }
 
-// Strings splits a comma-separated env var as-is, without trimming or dropping items.
-// Returns nil when the env var is unset or empty.
 func Strings(name string) []string {
 	s := os.Getenv(name)
 	if s == "" {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+func Bool(name string, fallback bool) bool {
+	if v, err := strconv.ParseBool(os.Getenv(name)); err == nil {
+		return v
+	}
+	return fallback
 }
 
 func Int(name string, fallback int) int {

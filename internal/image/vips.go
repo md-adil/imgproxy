@@ -11,7 +11,7 @@ var formats = []bimg.ImageType{
 	bimg.JPEG,
 	bimg.PNG,
 	bimg.WEBP,
-	bimg.AVIF, // Will fail silently if not supported by libvips
+	bimg.AVIF,
 	bimg.TIFF,
 }
 

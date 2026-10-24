@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-// LimitMiddleware limits concurrent requests to maxReq. Requests that cannot
-// acquire a slot within timeout receive a 503. Paths in skipPaths bypass the limit.
 func LimitMiddleware(next http.Handler, maxReq int, timeout time.Duration, skipPaths ...string) http.Handler {
 	sem := make(chan struct{}, maxReq)
 	skip := make(map[string]struct{}, len(skipPaths))
@@ -26,11 +24,14 @@ func LimitMiddleware(next http.Handler, maxReq int, timeout time.Duration, skipP
 			return
 		default:
 			log.Println("Slot is not available yet, waiting...")
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 				next.ServeHTTP(w, r)
-			case <-time.After(timeout):
+			case <-r.Context().Done():
+			case <-timer.C:
 				log.Println("Timeout, Server busy")
 				http.Error(w, "Server busy", http.StatusServiceUnavailable)
 			}

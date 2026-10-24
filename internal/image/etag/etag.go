@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/h2non/bimg"
 )
@@ -47,9 +48,14 @@ func Generate(image []byte, url string, opt bimg.Options) string {
 }
 
 func Matched(r *http.Request, etag string) bool {
-	header := r.Header.Get("If-None-Match")
-	if header == "" {
+	if etag == "" {
 		return false
 	}
-	return header == etag
+	for _, v := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		v = strings.TrimSpace(v)
+		if v == "*" || strings.Trim(strings.TrimPrefix(v, "W/"), `"`) == etag {
+			return true
+		}
+	}
+	return false
 }

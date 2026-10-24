@@ -2,10 +2,12 @@ package image
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -18,7 +20,6 @@ import (
 )
 
 var (
-	// HTTP client with keepalive + timeouts
 	httpClient = &http.Client{
 		Timeout: 12 * time.Second,
 		Transport: &http.Transport{
@@ -28,6 +29,15 @@ var (
 			MaxIdleConnsPerHost:   50,
 			TLSHandshakeTimeout:   5 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if req.URL.Hostname() != via[0].URL.Hostname() {
+				return fmt.Errorf("redirect to another host %q blocked", req.URL.Host)
+			}
+			return nil
 		},
 	}
 	bufPool = sync.Pool{
@@ -46,19 +56,27 @@ func safeProcessImage(origImg []byte, opts bimg.Options) (newImg []byte, err err
 	return
 }
 
-func writeImage(w http.ResponseWriter, img []byte, mediaType bimg.ImageType, tag string) {
-	mimeType := fmt.Sprintf("image/%s", bimg.ImageTypeName(mediaType))
-	header := w.Header()
-	header.Set("Content-Type", mimeType)
-
+func setCacheHeaders(header http.Header, tag string) {
 	header.Set("Cache-Control", "public, max-age=2592000")
-
 	if tag != "" {
-		header.Set("ETag", tag)
+		header.Set("ETag", `"`+tag+`"`)
 	}
-
 	header.Set("Vary", "Accept")
+}
 
+func writeNotModified(w http.ResponseWriter, tag string) {
+	setCacheHeaders(w.Header(), tag)
+	w.WriteHeader(http.StatusNotModified)
+}
+
+func writeImage(w http.ResponseWriter, r *http.Request, img []byte, mediaType bimg.ImageType, tag string) {
+	if etag.Matched(r, tag) {
+		writeNotModified(w, tag)
+		return
+	}
+	header := w.Header()
+	header.Set("Content-Type", fmt.Sprintf("image/%s", bimg.ImageTypeName(mediaType)))
+	setCacheHeaders(header, tag)
 	header.Set("X-Content-Type-Options", "nosniff")
 
 	w.WriteHeader(http.StatusOK)
@@ -67,43 +85,54 @@ func writeImage(w http.ResponseWriter, img []byte, mediaType bimg.ImageType, tag
 	}
 }
 
-func handleImage(store *cache.Store, w http.ResponseWriter, r *http.Request) {
+func intParam(query url.Values, name string, maxValue int) (int, bool) {
+	s := query.Get(name)
+	if s == "" {
+		return 0, true
+	}
+	v, err := strconv.Atoi(s)
+	return v, err == nil && v >= 0 && v <= maxValue
+}
+
+func handleImage(store *cache.Store, defaultSSL bool, w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	srcDomain := query.Get("d")
 
-	width, _ := strconv.Atoi(query.Get("w"))
-	height, _ := strconv.Atoi(query.Get("h"))
-	quality, _ := strconv.Atoi(query.Get("q"))
-
-	// Clamp dimensions and quality to sane limits
 	const maxDim = 8000
 	const maxQuality = 100
-	if width < 0 || width > maxDim {
+	width, ok := intParam(query, "w", maxDim)
+	if !ok {
 		http.Error(w, "Invalid width", http.StatusBadRequest)
 		return
 	}
-	if height < 0 || height > maxDim {
+	height, ok := intParam(query, "h", maxDim)
+	if !ok {
 		http.Error(w, "Invalid height", http.StatusBadRequest)
 		return
 	}
-	if quality < 0 || quality > maxQuality {
+	quality, ok := intParam(query, "q", maxQuality)
+	if !ok {
 		http.Error(w, "Invalid quality", http.StatusBadRequest)
 		return
 	}
 
-	// Source scheme: http by default, ssl=true switches to https
-	scheme := "http"
+	ssl := defaultSSL
 	switch query.Get("ssl") {
-	case "", "false":
+	case "":
+	case "false":
+		ssl = false
 	case "true":
-		scheme = "https"
+		ssl = true
 	default:
 		http.Error(w, "Invalid ssl", http.StatusBadRequest)
 		return
 	}
+	scheme := "http"
+	if ssl {
+		scheme = "https"
+	}
 
-	// Route prefix is stripped by the mux (see IMAGE_PATH_PREFIX)
-	srcURL := fmt.Sprintf("%s://%s/%s", scheme, srcDomain, r.URL.Path)
+	srcURL := fmt.Sprintf("%s://%s/%s", scheme, srcDomain, r.URL.EscapedPath())
 
 	mediaType := GetMediaType(r.Header.Get("Accept"))
 
@@ -127,24 +156,17 @@ func handleImage(store *cache.Store, w http.ResponseWriter, r *http.Request) {
 		options.Height = height
 	}
 
-	// Cache key depends only on source URL and options, so hits skip fetching the source.
-	// With caching enabled it also serves as the ETag, keeping hits and misses consistent.
 	var cacheKey string
 	if store != nil {
 		cacheKey = etag.Generate(nil, srcURL, options)
-		if etag.Matched(r, cacheKey) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
 		if img, ok := store.Get(cacheKey); ok {
-			writeImage(w, img, mediaType, cacheKey)
+			writeImage(w, r, img, mediaType, etag.Generate(img, srcURL, options))
 			return
 		}
 	}
 
 	log.Println("Processing Image:", srcURL)
 
-	// Use request context so upstream fetch is cancelled if client disconnects
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, srcURL, nil)
 	if err != nil {
 		http.Error(w, "Failed to build request", http.StatusInternalServerError)
@@ -187,14 +209,14 @@ func handleImage(store *cache.Store, w http.ResponseWriter, r *http.Request) {
 
 	origImg := buf.Bytes()
 
-	tag := cacheKey
-	if tag == "" {
+	var tag string
+	if store == nil {
 		tag = etag.Generate(origImg, srcURL, options)
-	}
-	if etag.Matched(r, tag) {
-		w.WriteHeader(http.StatusNotModified)
-		log.Println("Skipping already matched with ETag")
-		return
+		if etag.Matched(r, tag) {
+			writeNotModified(w, tag)
+			log.Println("Skipping already matched with ETag")
+			return
+		}
 	}
 
 	newImg, err := safeProcessImage(origImg, options)
@@ -205,21 +227,23 @@ func handleImage(store *cache.Store, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cacheKey != "" {
+	if store != nil {
 		store.Put(cacheKey, newImg)
+		tag = etag.Generate(newImg, srcURL, options)
 	}
 
 	log.Println("Sending Type", bimg.ImageTypeName(mediaType))
-	writeImage(w, newImg, mediaType, tag)
+	writeImage(w, r, newImg, mediaType, tag)
 }
 
-// Handler returns the image handler. A nil store disables disk caching.
 func Handler(store *cache.Store) func(w http.ResponseWriter, r *http.Request) {
 	bimg.VipsCacheSetMax(100)
-	bimg.VipsCacheSetMaxMem(config.Int("VIPS_CACHE_MAX_MEM_MB", 512)) // MB
+	bimg.VipsCacheSetMaxMem(config.Int("VIPS_CACHE_MAX_MEM_MB", 512))
 	PrintSupportedFormats()
 	WarmLibVips()
+	defaultSSL := config.Bool("DEFAULT_SSL", false)
+	log.Printf("DEFAULT_SSL=%t", defaultSSL)
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleImage(store, w, r)
+		handleImage(store, defaultSSL, w, r)
 	}
 }

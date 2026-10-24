@@ -23,7 +23,7 @@ func getMaxWorker() int {
 }
 
 func main() {
-	// Allow GOMAXPROCS override
+
 	if n := config.Int("GOMAXPROCS", 0); n > 0 {
 		runtime.GOMAXPROCS(n)
 	}
@@ -35,12 +35,12 @@ func main() {
 	mux := http.NewServeMux()
 	handler := middleware.LimitMiddleware(mux, maxReq, 25*time.Second, "/health-z")
 	wl := domain.CreateWhitelist()
-	// Used as-is, e.g. "/x" serves images under /x/; empty serves from root
+
 	prefix := config.String("IMAGE_PATH_PREFIX", "") + "/"
-	// Disk cache is enabled only when CACHE_DIR is set, e.g. "file:///app/cached"
-	store, err := cache.New(config.String("CACHE_DIR", ""))
+
+	store, err := cache.New(config.String("CACHE_URL", ""))
 	if err != nil {
-		log.Fatalf("CACHE_DIR: %v", err)
+		log.Fatalf("CACHE_URL: %v", err)
 	}
 	mux.Handle(prefix, http.StripPrefix(prefix, wl.Guard(http.HandlerFunc(image.Handler(store)))))
 	mux.HandleFunc("/health-z", healthCheck)
@@ -49,11 +49,10 @@ func main() {
 		Addr:         ":8080",
 		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
 	idleConnsClosed := make(chan struct{})
 	go func() {
 		signals := make(chan os.Signal, 1)
@@ -68,8 +67,8 @@ func main() {
 		close(idleConnsClosed)
 	}()
 
-	log.Printf("Server starting on %s (PREFIX=%s, CACHE_DIR=%q, MAX_WORKERS=%d, VIPS_CONCURRENCY=%s)\n",
-		srv.Addr, prefix, store.Dir(), maxWorkers, os.Getenv("VIPS_CONCURRENCY"))
+	log.Printf("Server starting on %s (PREFIX=%s, CACHE_PATH=%q, CACHE_VALIDITY=%s, MAX_WORKERS=%d, VIPS_CONCURRENCY=%s)\n",
+		srv.Addr, prefix, store.Dir(), store.Validity(), maxWorkers, os.Getenv("VIPS_CONCURRENCY"))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("ListenAndServe(): %v", err)
 	}
